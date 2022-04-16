@@ -1,0 +1,178 @@
+---
+title: 'Many Speech: Data Wranging'
+author: "Someone"
+date: '2022-04-10'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importing data files and libraries
+
+```{r}
+library(tidyverse)
+library(ggbeeswarm)
+
+# these are the durations for all the words extracted
+# via Praat
+durs <- read_tsv("data/all_durations.tsv", locale=locale(encoding="UTF-16"))
+
+# and the trial list
+tl <-
+    # list all csv files in data/trial-lists
+    list.files(path="data/trial-lists",
+               pattern = "*.csv",
+               full.names=T) %>% 
+    # read them via read_csv
+    map_df(~read_csv(.)) %>%
+    # create a single data frame
+    bind_rows()
+```
+
+## Processing data frames
+
+First, we remove all items where the notes column is non-zero.
+
+```{r}
+durs <- filter(durs, is.na(error))
+```
+
+Second, we need to remove the words from the sentence frame and keep the targets only.
+
+```{r}
+# obtain a list of colour + target terms
+### nouns
+nouns <- tl %>%
+  pull(target_name) %>%
+  unique() %>%
+  tolower()
+
+### colours
+colours <- c("orangen", "roten", "braunen", "gelben", "gruenen")
+
+### both
+words_to_keep <- c(nouns, colours)
+
+# checking if these are all in durs
+mean(words_to_keep %in% durs$word)
+
+# check if the target words in durs are only the ones in
+# words_to_keep
+### words that follow any given item
+words_foll <- c(durs$word[2:(length(durs$word))], "")
+### words that are two words forward from any given item
+words_foll_2 <- c(durs$word[3:(length(durs$word))], "", "")
+### words that are followed by ablegen or a word + ablegen
+### (this should pick out the colour + target)
+words_before_ablegen <- durs$word[words_foll=="ablegen" | words_foll_2=="ablegen"] %>% unique()
+### is it the same as words_to_keep?
+setequal(words_before_ablegen, words_to_keep)
+### awesome!
+
+# now we remove the non-target / colour items from durs
+durs <- durs %>%
+  filter(word %in% words_to_keep)
+```
+
+We also remove any items from dur, where the end of the colour term is not the same as the start of the target term.
+
+```{r}
+durs <- durs %>%
+  group_by(speaker, trial) %>%
+  mutate(broken = end[1] != start[2]) %>%
+  ungroup() %>%
+  filter(!broken)
+```
+
+We now rearrange the data to show the separate durations of the Adj and the Noun.
+
+```{r}
+durs <- durs %>%
+  group_by(speaker, trial) %>%
+  summarise(
+    target_colour_textgrid=word[1],
+    target_name_textgrid=word[2],
+    colour_start=start[1],
+    colour_end=end[1],
+    colour_dur=end[1]-start[1],
+    item_start=start[2],
+    item_end=end[2],
+    item_dur=end[2]-start[2],
+  ) %>%
+  ungroup() %>%
+  #mutate(trial=as.numeric(gsub("t","", trial))) %>%
+  arrange(speaker, trial)
+```
+
+We now merge with the trial list.
+
+```{r}
+durs <- left_join(
+  durs,
+  tl,
+  by=c("speaker","trial")
+)
+
+# checking if target name / colour are correct
+# (the complexity below is because the textgrids show inflected
+# adjectives, while the trial list had base forms)
+mean(durs$target_colour == substr(durs$target_colour_textgrid, 1, nchar(durs$target_colour)))
+mean(tolower(durs$target_name) == durs$target_name_textgrid)
+# that all looks good!
+```
+
+We now limit the data to the key condition, NF, and save the data as a csv file.
+
+```{r}
+durs <- durs %>%
+  filter(condition=="NF")
+```
+
+## Data filtering
+
+At this point, we are not looking to perform any sophisticated filtering; we are simply looking for obvious errors!
+
+```{r}
+ggplot(durs, aes(x=NA, y=colour_dur)) +
+  facet_wrap(~speaker) +
+  geom_quasirandom()
+```
+There are some longer measurements, e.g. for LG and CG -- but it's hard to tell whether these are errors or true outliers. We'll keep them for now!
+
+```{r}
+ggplot(durs, aes(x=colour_dur)) +
+  geom_density(bw=0.02)
+```
+
+## Spot-checking the data
+
+We want to avoid any obvious errors in the measurements. I will spot-check a total of 60 randomly chosen measurements. I will pick the measurements in this script, and automatically bring them up in Praat. (NOTE: the paths here are specific to my machine, so may need adjustment to work on other computers.)
+
+```{r}
+praat_path = "/Applications/Praat.app/Contents/MacOS/Praat"
+script_path = "~/Documents/Research/current/2022/many_speech/scripts/open_sound+tg_at.praat"
+system(praat_path)
+
+set.seed(12341234)
+# measurements to check:
+to_check <- durs[sample(1:nrow(durs), 60, replace=F),]
+to_check$base_path <- paste0(getwd(), "/", "data/audio_final/", to_check$speaker, "/", to_check$speaker)
+
+for (i in 1:nrow(to_check)) {
+  cat("\r                               \r", to_check[i,]$target_colour, to_check[i,]$target_name, to_check[i,]$colour_dur)
+  system(paste0(praat_path, " --send ", script_path, ' "', to_check[i,]$base_path, '" ',  to_check[i,]$colour_start-0.25, " ", to_check[i,]$item_end + 0.25))
+  readline(prompt="Press [enter] to continue")
+}
+```
+
+Some issues were discovered during this process that prompted a re-run of the aligner. Specifically, the German dictionary for the aligner specifies /ɔʁaŋn/ as the only pronunciation of "orangen", but participants pronounced this word (almost?) exclusively as something more like /ɔʁaŋʃn/ (at least using the phones available in the phone set used for alignment - a closer IPA rendering would probably be /ɔʁãːʒnn/). This occasionally tripped up the aligner. Adding the alternative pronunciation /ɔʁaŋʃn/ to the dictionary fixed these issues, resulting in accurate alignments of "orangen".
+
+Other than this issue (which is no longer apparent in the alignments due to the fix above), the alignments appeared highly accurate and reliable, close to what a human annotator would likely create. Also, the durations in the duration textgrid are the same as those in the textgrid, i.e. no issues with the data processing scripts were revealed.
+
+## Saving the data
+
+```{r}
+write_csv(durs, "processed_data/NF_durations.csv")
+```

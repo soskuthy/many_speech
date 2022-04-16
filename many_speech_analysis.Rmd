@@ -1,0 +1,259 @@
+---
+title: 'Many Speech: Analysis'
+author: "Anon."
+date: '2022-04-11'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importing data files and libraries
+
+```{r}
+library(tidyverse)
+library(brms)
+library(bayestestR)
+library(ggbeeswarm)
+
+durs <- read_csv("processed_data/NF_durations.csv")
+```
+
+## A preliminary plot
+
+Here are the durations of the adjectives by typicality, with each dot representing the average duration within a speaker.
+
+```{r}
+durs %>%
+  group_by(speaker, typicality) %>%
+  summarise(colour_dur=mean(colour_dur)) %>%
+  ungroup() %>%
+ggplot(aes(y=colour_dur, x=typicality, col=typicality)) +
+  geom_quasirandom()
+```
+
+Well, these look exactly the same! I'd be surprised if a mixed model found anything different, but let's have a look.
+
+## Statistical modelling
+
+What model specification should we use? Since we want to report a single statistic, and since we want to also be able to calculate measures of effect size, we will focus on two levels of the treatment variable (typicality): atypical vs. typical. If there is an effect of typicality, it is most likely to manifest in the difference between these two levels that are at the extremes of the typicality continuum.
+
+```{r}
+durs_atyp_typ <- filter(durs, typicality != "medium")
+```
+
+Here is what the model will look like (note that the typicality random slope by speaker will be removed, as it is estimated to be very close to 0, and seems to cause divergent transitions during model estimation; this makes the model very mildly anticonservative, which, given the null findings, is not so problematic):
+
+```{r}
+mod_formula <- 
+  colour_dur ~ 
+    typicality + 
+    (1 + typicality | target_colour) + 
+    (1 | target_name) + 
+    (1 + typicality | speaker)
+```
+
+The treatment variable is the two-levelled typicality variable, and there are three sets of random effects: intercepts & slopes over typicality by target_colour (since typicality varies within colour terms); intercepts by target_name (since typicality does not vary within target names); and intercepts & slopes over typicality by speaker. This model is very simple in terms of the fixed effects structure, but it also accounts for all possible dependencies in terms of the grouping factors in the data.
+
+The distribution family for the model will be lognormal. The lognormal model is appropriate given the distribution of the raw durations (shown below), and the fact that durations are bounded by 0 at the lower end.
+
+```{r}
+ggplot(durs, aes(x=colour_dur)) +
+  geom_density()
+```
+
+We will fit a Bayesian model. In order to construct priors for our model, it is useful to think about what duration values we are likely to see. In practice, a word with multiple segments is unlikely to be shorter than 0.05 s (which is already shorter than the average segment duration in most languages). It is also unlikely to be longer than 2 s. I'd expect the mean word duration to be somewhere between 0.2-0.7 s (this, of course, really depends on the segmental make-up of the words). These conservative minimum and maximum values and the mean are also supported by the distribution plot above (though, importantly, the values themselves are based on prior knowledge of typical word durations, not the current data set). For our lognormal model, we will want to know the logarithm of these values.
+
+```{r}
+log(0.05) # minimum
+log(0.5) # expected mean
+log(2) # maximum
+```
+
+Now let's come up with priors for our model. 
+
+INTERCEPT
+Under the brms parameterisation of the intercept (see ?prior), the intercept actually represents something close to the population mean (i.e. it performs internal centering of all fixed effect variables). Therefore, based on the reasoning above, we'll set the mean of the prior for the intercept to be the same as our expected grand mean, i.e. 0.5 s, which is roughly equal to -1 in log space. We want to keep the possible mean within the bounds that we came up with above (about -3 to +1), so we set the SD around the mean to be 1 (i.e. 95% percent of the probability density is between -3 and +1).
+
+TYPICALITY
+The prior will be centred around 0. We set the SD to 2, which means that a log difference of -4 to +4 (e.g. -3=log(0.05s) for typical and 1=log(2.7s) for atypical, or the other way round) would still be well within the range of this prior (even though such a huge difference is very unlikely in practice).
+
+RANDOM INTERCEPTS AND SLOPES
+We use the same priors for all random intercepts and slopes, a half student_t distribution with df=3, mean=0 and sd=1. For reference, a random intercept with a scale parameter of 2 (which is still perfectly possible under this prior) would mean that about 95% of speakers/items are within 4 log units of the population mean. Given our prior knowledge about the data, such a wide distribution is unlikely, but this prior is already more restrictive than the brms default. Similar arguments can be made for random slopes.
+
+CORRELATION MATRICES FOR RANDOM EFFECTS
+Using lkj(2) here as recommended by Vasishth et al. (2018).
+
+RESIDUAL VARIANCE
+Going to leave the default student_t(3,0,2.5) here, which is sufficiently permissive for our purposes.
+
+```{r}
+mod_priors <- c(
+  prior("normal(-1, 1)", class="Intercept"),
+  prior("normal(0, 2)", class="b"),
+  prior("student_t(3, 0, 1)", class="sd"),
+  prior("lkj(2)", class="L")
+)
+
+set.seed(12341234)
+mod <- brm(colour_dur ~ 
+             typicality + 
+             (1 + typicality | target_colour) + 
+             (1 | target_name) + 
+             (1 | speaker),
+           data=durs_atyp_typ, cores=4,
+           family=lognormal(),
+           prior=mod_priors,
+           control=list(adapt_delta=0.99,
+                        max_treedepth=16),
+           iter=4000,
+           warmup=2000)
+plot(mod)
+summary(mod)
+hdi(mod)
+pp_check(mod_alt)
+```
+
+The trace plots look OK, and the Rhat / ESS values also look OK. The posterior predictive check shows close alignment of the model predictions with the distribution of the actual data. 
+
+Precise numerical estimates for the headline results.
+
+```{r}
+summary(mod)$fixed[2,1]
+hdi(mod)$CI_low[2]
+hdi(mod)$CI_high[2]
+```
+
+The model estimate for the typicality parameter is close to 0: -0.011 with a CrI of [-0.256, 0.196] (based on the HDI interval). We have essentially no evidence that typicality affects the durations of the adjectives.
+
+Here is the same model with the random slope over typicality by speaker included.
+
+```{r}
+set.seed(12341234)
+mod_full <- brm(colour_dur ~ 
+             typicality + 
+             (1 + typicality | target_colour) + 
+             (1 | target_name) + 
+             (1 + typicality | speaker),
+           data=durs_atyp_typ, cores=4,
+           family=lognormal(),
+           prior=mod_priors,
+           control=list(adapt_delta=0.99,
+                        max_treedepth=16),
+           iter=4000,
+           warmup=2000)
+plot(mod_full)
+summary(mod_full)
+```
+
+As a very simple test of the robustness of our priors, we refit the model with the default brms prior settings. (These are almost all different from what we used here.)
+
+```{r}
+set.seed(43214321)
+mod_alt <- brm(colour_dur ~ 
+             typicality + 
+             (1 + typicality | target_colour) + 
+             (1 | target_name) + 
+             (1 | speaker),
+           data=durs_atyp_typ, cores=4,
+           family=lognormal(),
+           #prior=mod_priors,
+           control=list(adapt_delta=0.99,
+                        max_treedepth=16),
+           iter=4000,
+           warmup=2000)
+plot(mod_alt)
+summary(mod_alt)
+hdi(mod_alt)
+```
+
+```{r}
+summary(mod_alt)$fixed[2,1]
+hdi(mod_alt)$CI_low[2]
+hdi(mod_alt)$CI_high[2]
+```
+
+
+The conclusions are exactly the same with respect to the key predictor, though the model has very slightly worse convergence properties.
+
+We now move back to our model with weakly informative priors. Calculating Cohen's D using the approach in Nalborczyk et al. (2019):
+
+```{r}
+cohens_d <-
+  # extracting posterior samples from mod
+  posterior_samples(mod, pars = c("^b_", "sd_", "sigma")) %>% 
+  # taking the square of each variance component
+  mutate_at(3:ncol(.), function (x) {x**2} ) %>%
+  # dividing the slope estimate by the square root of the sum of 
+  # all variance components
+  mutate(delta = b_typicalitytypical / sqrt(rowSums(.[3:ncol(.)]) ) ) %>%
+  pull(delta)
+
+mean(cohens_d) # mean Cohen's D
+quantile(cohens_d, c(0.025, 0.975)) # 95% CrI
+```
+
+The point estimate (mean) of the effect size is -0.028, i.e. vanishingly small. The 95% credible interval around this estimate is [-0.58,0.51].
+
+The main effect in seconds (i.e. no longer on the log scale):
+
+```{r}
+typical_posteriors_in_s <- exp(rowSums(posterior_samples(mod)[,1:2]))
+atypical_posteriors_in_s <- exp(posterior_samples(mod)[,1])
+diffs <- typical_posteriors_in_s - atypical_posteriors_in_s
+
+mean(diffs)
+hdi(diffs)$CI_low
+hdi(diffs)$CI_high
+```
+
+That is, the difference between typical vs. atypical is -0.004 s such that typical is shorter than atypical, with a 95% CrI of [-0.09, 0.08].
+
+Finally, a summary plot with the model estimates atop the raw data.
+
+```{r}
+newdat <- data.frame(typicality=c("atypical","typical"))
+
+newdat$colour_dur <- c(
+  mean(typical_posteriors_in_s),
+  mean(atypical_posteriors_in_s)
+)
+newdat$ll <- c(
+  hdi(typical_posteriors_in_s)$CI_low,
+  hdi(atypical_posteriors_in_s)$CI_low
+)
+newdat$ul <- c(
+  hdi(typical_posteriors_in_s)$CI_high,
+  hdi(atypical_posteriors_in_s)$CI_high
+)
+
+durs_atyp_typ %>%
+  group_by(speaker, typicality) %>%
+  summarise(colour_dur=mean(colour_dur)) %>%
+  ungroup() %>%
+ggplot(aes(y=colour_dur, x=typicality, col=typicality)) +
+  geom_quasirandom(size=5, alpha=0.3, pch=16) +
+  geom_errorbar(data=newdat, aes(ymin=ll, ymax=ul), col="black", width=0.1) +
+  geom_point(data=newdat, aes(fill=typicality), pch=21, size=8, col="black") +
+  scale_colour_manual(values=c("orange","purple"), guide="none") +
+  scale_fill_manual(values=c("orange3","purple3"), guide="none") +
+  ylab("duration of adjective (s)") +
+  theme_minimal() +
+  theme(
+    axis.title.x=element_blank(),
+    axis.title.y=element_text(size=16, face="bold"),
+    axis.text.x=element_text(size=16, face="bold", colour="black"),
+    axis.text.y=element_text(size=14, colour="black"),
+    axis.line.y=element_line(),
+    axis.ticks.y=element_line(),
+    panel.grid=element_blank())
+ggsave("typical_atypical.png", width=6, height=4.5, dpi=300)
+```
+
+
+## References
+
+Nalborczyk, L., Batailler, C., Lœvenbruck, H., Vilain, A., & Bürkner, P. C. (2019). An introduction to Bayesian multilevel models using brms: A case study of gender effects on vowel variability in standard Indonesian. Journal of Speech, Language, and Hearing Research, 62(5), 1225-1242.
+
+Vasishth, S., Nicenboim, B., Beckman, M.E., Li, F., & Kong, E.J. (2018). Bayesian data analysis in the phonetic sciences: A tutorial introduction. Journal of Phonetics, 71, 147-161.

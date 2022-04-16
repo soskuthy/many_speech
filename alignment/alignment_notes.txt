@@ -1,0 +1,31 @@
+alignment was run on a Mac laptop as follows:
+
+# installing MFA:
+
+conda create -n mfa
+conda activate mfa
+conda install montreal-forced-aligner
+
+# testing alignment
+# with data as working directory
+
+mfa validate audio_edited ../alignment/german_mfa_edited.dict german_mfa --ignore_acoustics
+
+# manually edited the dictionary as follows, and saved as
+# alignment/german_mfa_edited.dict
+
+gruenen	0.99	0.13	3.94	1.12	ɡ ʁ yː n n̩
+bueroklammer	0.99	0.82	1.46	1.04	b ʏ ʁ oː k l a m ɐ
+moehre	1.0	0.0	0.0	0.0	m øː ʁ ə
+waescheklammer	1.0	0.0	0.0	0.0	v ɛ ʃ ə k l a m ɐ
+orangen	0.99	0.62	0.0	0.0	ɔ ʁ a ŋ ʃ n̩
+
+### (this last entry is a bit of a hack, as the /a/ tends to be long and nasalised, and the /ʃ/ is often voiced, but neither of these phones are in the mfa phone set)
+
+# ran validation again
+
+mfa validate audio_edited ../alignment/german_mfa_edited.dict german_mfa --ignore_acoustics
+
+# and alignment!
+
+mfa align audio_edited ../alignment/german_mfa_edited.dict german_mfa audio_final
